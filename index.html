@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Partículas Interactivas con Gestos</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: 'Segoe UI', sans-serif; }
+        
+        /* Contenedor de Video (Oculto, solo para procesamiento) */
+        #video-container { position: absolute; top: 0; left: 0; opacity: 0; pointer-events: none; z-index: -1; }
+        
+        /* Interfaz de Usuario (Glassmorphism) */
+        #ui-container {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 15px;
+            padding: 15px 25px;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            z-index: 10;
+            align-items: center;
+        }
+
+        .btn {
+            background: transparent;
+            border: 1px solid rgba(255,255,255,0.4);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.8rem;
+        }
+
+        .btn:hover, .btn.active {
+            background: white;
+            color: #000;
+            box-shadow: 0 0 15px rgba(255, 255, 255, 0.5);
+        }
+
+        /* Selector de Color Personalizado */
+        input[type="color"] {
+            -webkit-appearance: none;
+            border: none;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            cursor: pointer;
+            background: none;
+        }
+        input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+        input[type="color"]::-webkit-color-swatch { border: 2px solid white; border-radius: 50%; }
+
+        /* Estado de carga */
+        #loading {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 1.5rem;
+            text-align: center;
+            pointer-events: none;
+        }
+        
+        /* Indicador de mano */
+        #status {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            color: rgba(255,255,255,0.7);
+            font-size: 0.9rem;
+        }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="loading">Cargando IA de visión y 3D...<br><span style="font-size:0.8rem">Por favor permite el acceso a la cámara</span></div>
+    <div id="status">Esperando mano...</div>
+
+    <div id="ui-container">
+        <button class="btn active" onclick="setShape('heart')">Corazón</button>
+        <button class="btn" onclick="setShape('flower')">Flor</button>
+        <button class="btn" onclick="setShape('saturn')">Saturno</button>
+        <button class="btn" onclick="setShape('fireworks')">Explosión</button>
+        <div style="width: 1px; height: 30px; background: rgba(255,255,255,0.3); margin: 0 10px;"></div>
+        <input type="color" id="colorPicker" value="#ff0055" title="Cambiar Color">
+    </div>
+
+    <video id="webcam" style="display:none;" autoplay playsinline></video>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+
+        // --- Configuración Global ---
+        const PARTICLE_COUNT = 15000;
+        const CAM_FOV = 75;
+        let scene, camera, renderer, particles, geometry, material;
+        let handLandmarker;
+        let running = false;
+        
+        // Estado del sistema
+        const state = {
+            currentShape: 'heart',
+            targetPositions: new Float32Array(PARTICLE_COUNT * 3), // A donde quieren ir las partículas
+            handClosed: false,
+            handPosition: new THREE.Vector3(0, 0, 0),
+            baseColor: new THREE.Color(0xff0055),
+            interactionStrength: 0
+        };
+
+        // --- 1. Inicialización de Three.js ---
+        function initThree() {
+            scene = new THREE.Scene();
+            // Niebla suave para profundidad
+            scene.fog = new THREE.FogExp2(0x050505, 0.02);
+
+            camera = new THREE.PerspectiveCamera(CAM_FOV, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 30;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+
+            // Crear Partículas
+            geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(PARTICLE_COUNT * 3);
+            
+            // Inicializar posiciones aleatorias
+            for(let i=0; i<PARTICLE_COUNT*3; i++) {
+                positions[i] = (Math.random() - 0.5) * 100;
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+            // Material moderno brillante
+            material = new THREE.PointsMaterial({
+                color: state.baseColor,
+                size: 0.15,
+                transparent: true,
+                opacity: 0.8,
+                blending: THREE.AdditiveBlending,
+                sizeAttenuation: true
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+
+            // Luz ambiental
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+
+            window.addEventListener('resize', onWindowResize);
+            
+            // Generar forma inicial
+            generateShape('heart');
+        }
+
+        // --- 2. Matemáticas de las Formas ---
+        function generateShape(type) {
+            const arr = state.targetPositions;
+            
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                let x, y, z;
+
+                if (type === 'heart') {
+                    // Ecuación paramétrica del corazón 3D
+                    // Referencia matemática: x = 16sin^3(t), y = ...
+                    const t = Math.random() * Math.PI * 2;
+                    const phi = Math.random() * Math.PI; // Distribución esférica parcial
+                    
+                    // Variante simplificada para nube de puntos
+                    const r = 10; 
+                    // Formula base 2D expandida
+                    let tx = 16 * Math.pow(Math.sin(t), 3);
+                    let ty = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+                    
+                    // Añadir volumen Z
+                    x = tx + (Math.random() - 0.5) * 2;
+                    y = ty + (Math.random() - 0.5) * 2;
+                    z = (Math.random() - 0.5) * 8 * Math.sin(t); // Grosor variable
+                    
+                } else if (type === 'flower') {
+                    // Rosa polar
+                    const theta = Math.random() * Math.PI * 2;
+                    const phi = (Math.random() - 0.5) * Math.PI;
+                    const k = 4; // 4 pétalos
+                    const r = 10 * Math.cos(k * theta);
+                    
+                    x = r * Math.cos(theta) * Math.cos(phi);
+                    y = r * Math.sin(theta) * Math.cos(phi);
+                    z = r * Math.sin(phi) * 2;
+
+                } else if (type === 'saturn') {
+                    // 70% partículas en el planeta, 30% en los anillos
+                    if (Math.random() > 0.3) {
+                        // Esfera
+                        const r = 6;
+                        const theta = Math.random() * Math.PI * 2;
+                        const phi = Math.acos(2 * Math.random() - 1);
+                        x = r * Math.sin(phi) * Math.cos(theta);
+                        y = r * Math.sin(phi) * Math.sin(theta);
+                        z = r * Math.cos(phi);
+                    } else {
+                        // Anillos
+                        const theta = Math.random() * Math.PI * 2;
+                        const r = 8 + Math.random() * 6; // Radio entre 8 y 14
+                        x = r * Math.cos(theta);
+                        z = r * Math.sin(theta);
+                        y = (Math.random() - 0.5) * 0.5; // Muy planos
+                        
+                        // Rotar anillos
+                        const tilt = 0.4;
+                        const tempY = y * Math.cos(tilt) - z * Math.sin(tilt);
+                        const tempZ = y * Math.sin(tilt) + z * Math.cos(tilt);
+                        y = tempY;
+                        z = tempZ;
+                    }
+
+                } else if (type === 'fireworks') {
+                    // Esfera aleatoria grande (caos)
+                    const r = 25 * Math.random();
+                    const theta = Math.random() * Math.PI * 2;
+                    const phi = Math.acos(2 * Math.random() - 1);
+                    x = r * Math.sin(phi) * Math.cos(theta);
+                    y = r * Math.sin(phi) * Math.sin(theta);
+                    z = r * Math.cos(phi);
+                }
+
+                arr[i3] = x;
+                arr[i3 + 1] = y;
+                arr[i3 + 2] = z;
+            }
+        }
+
+        // --- 3. Detección de Manos (MediaPipe) ---
+        async function initHandTracking() {
+            const vision = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+            );
+            
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                    delegate: "GPU"
+                },
+                runningMode: "VIDEO",
+                numHands: 1
+            });
+
+            startWebcam();
+        }
+
+        async function startWebcam() {
+            const video = document.getElementById('webcam');
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+                video.addEventListener('loadeddata', () => {
+                    document.getElementById('loading').style.display = 'none';
+                    predictWebcam();
+                });
+            } catch (err) {
+                alert("Error al acceder a la cámara. Asegúrate de usar HTTPS o localhost.");
+            }
+        }
+
+        let lastVideoTime = -1;
+        async function predictWebcam() {
+            const video = document.getElementById('webcam');
+            let nowInMs = Date.now();
+            
+            if (video.currentTime !== lastVideoTime) {
+                lastVideoTime = video.currentTime;
+                const results = handLandmarker.detectForVideo(video, nowInMs);
+
+                if (results.landmarks && results.landmarks.length > 0) {
+                    const landmarks = results.landmarks[0];
+                    
+                    // --- Lógica de Gestos ---
+                    
+                    // 1. Posición (Usamos la muñeca [0] y el dedo medio [9] para el centro)
+                    // Mapeamos de coordenadas normalizadas (0-1) a coordenadas de mundo 3D (-X a +X)
+                    // Invertimos X porque la cámara es espejo
+                    const x = (0.5 - landmarks[9].x) * 30; 
+                    const y = (0.5 - landmarks[9].y) * 20;
+                    
+                    // Suavizado (Lerp) de la posición de la mano para que no tiemble
+                    state.handPosition.x += (x - state.handPosition.x) * 0.1;
+                    state.handPosition.y += (y - state.handPosition.y) * 0.1;
+
+                    // 2. Detectar Apertura/Cierre (Distancia entre punta del índice [8] y muñeca [0])
+                    // Un umbral simple suele funcionar bien
+                    const tip = landmarks[8];
+                    const wrist = landmarks[0];
+                    const distance = Math.sqrt(
+                        Math.pow(tip.x - wrist.x, 2) + Math.pow(tip.y - wrist.y, 2)
+                    );
+
+                    // Si la distancia es corta, la mano está cerrada (puño)
+                    const isClosed = distance < 0.25; // Ajustar según necesidad
+                    state.handClosed = isClosed;
+
+                    document.getElementById('status').innerText = isClosed ? "Gesto: PUÑO (Controlar)" : "Gesto: ABIERTO (Fluir)";
+                    document.getElementById('status').style.color = isClosed ? "#ff5555" : "#55ff55";
+
+                } else {
+                    document.getElementById('status').innerText = "Buscando mano...";
+                    document.getElementById('status').style.color = "white";
+                    state.handClosed = false;
+                }
+            }
+            window.requestAnimationFrame(predictWebcam);
+        }
+
+
+        // --- 4. Bucle de Animación y Física ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (!particles) return;
+
+            const positions = particles.geometry.attributes.position.array;
+            const targets = state.targetPositions;
+            const time = Date.now() * 0.001;
+
+            // Ajustar fuerza de interacción basada en el gesto
+            // Si la mano está cerrada, la fuerza aumenta
+            const targetStrength = state.handClosed ? 1.0 : 0.0;
+            state.interactionStrength += (targetStrength - state.interactionStrength) * 0.1;
+
+            // Rotación suave global
+            particles.rotation.y += 0.002;
+            if(state.currentShape === 'saturn') particles.rotation.z = 0.3; // Inclinación Saturno
+            else particles.rotation.z = 0;
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                
+                // 1. Obtener posición actual y objetivo
+                let cx = positions[i3];
+                let cy = positions[i3 + 1];
+                let cz = positions[i3 + 2];
+                
+                let tx = targets[i3];
+                let ty = targets[i3 + 1];
+                let tz = targets[i3 + 2];
+
+                // 2. Ruido / Movimiento Orgánico ("Respiración")
+                // Añadimos una onda sinusoidal basada en el tiempo y la posición
+                tx += Math.sin(time + cx * 0.1) * 0.2;
+                ty += Math.cos(time + cy * 0.1) * 0.2;
+
+                // 3. Interacción con la Mano
+                if (state.interactionStrength > 0.01) {
+                    // Si hay interacción, ignoramos la forma y atraemos/modificamos con la mano
+                    
+                    // Calcular vector hacia la mano
+                    const dx = cx - state.handPosition.x;
+                    const dy = cy - state.handPosition.y;
+                    
+                    // Efecto: Cuando cierras la mano, las partículas se condensan y siguen tu mano
+                    // O se expanden explosivamente (depende del diseño).
+                    // Aquí: Se atraen al centro de la mano (efecto agujero negro) y rotan
+                    
+                    // Factor de mezcla: 0 = Forma Original, 1 = Posición Mano
+                    const mix = state.interactionStrength; 
+                    
+                    // Modificar Target hacia la mano con algo de ruido aleatorio para que parezca energía
+                    tx = tx * (1 - mix) + (state.handPosition.x + (Math.random()-0.5)*5) * mix;
+                    ty = ty * (1 - mix) + (state.handPosition.y + (Math.random()-0.5)*5) * mix;
+                    
+                    // Al cerrar la mano, comprimimos Z también
+                    tz = tz * (1 - mix) + (0 + (Math.random()-0.5)*5) * mix;
+                }
+
+                // 4. Integración (Lerp) - Movimiento suave hacia el nuevo objetivo
+                // Velocidad variable: más rápido si hay interacción
+                const speed = state.handClosed ? 0.1 : 0.05;
+                
+                positions[i3] += (tx - cx) * speed;
+                positions[i3 + 1] += (ty - cy) * speed;
+                positions[i3 + 2] += (tz - cz) * speed;
+            }
+
+            particles.geometry.attributes.position.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- Exponer funciones a HTML ---
+        window.setShape = (shape) => {
+            state.currentShape = shape;
+            generateShape(shape);
+            
+            // Actualizar UI
+            document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+            event.target.classList.add('active');
+        };
+
+        // Event Listener Color
+        document.getElementById('colorPicker').addEventListener('input', (e) => {
+            state.baseColor.set(e.target.value);
+            if(material) material.color = state.baseColor;
+        });
+
+        // Iniciar
+        initThree();
+        initHandTracking();
+        animate();
+
+    </script>
+</body>
+</html>
